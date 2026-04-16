@@ -17,7 +17,7 @@ data class ScanResult(
 
 class ANClient(
     private val apiKey: String,
-    private val baseUrl: String = "https://api.antinude.com",
+    private val baseUrl: String = "https://antinude.site",
 ) {
 
     suspend fun scanImage(bytes: ByteArray, mime: String = "image/jpeg"): ScanResult =
