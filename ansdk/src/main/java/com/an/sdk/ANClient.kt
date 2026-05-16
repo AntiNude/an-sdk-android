@@ -90,7 +90,7 @@ class ANClient(
     private fun round4(v: Double): Double = (v * 10000).toInt() / 10000.0
 
     private fun runLocalModel(bytes: ByteArray): ScanResult {
-        if (bytes.isEmpty()) throw IllegalArgumentException("empty image")
+        if (bytes.isEmpty()) throw ANException(ANErrorCode.EMPTY_IMAGE, message = "empty image")
         // Pretend the model takes 30–80 ms to run.
         Thread.sleep(30L + Random.nextLong(50))
         val unsafe = Random.nextDouble() < 0.15
@@ -147,27 +147,92 @@ class ANClient(
             }
         }.toString().toByteArray()
 
-        val conn = (URL(baseUrl + "/api/v1/scan").openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            doOutput = true
-            connectTimeout = 10_000
-            readTimeout = 15_000
-            setRequestProperty("Authorization", "Bearer $apiKey")
-            setRequestProperty("Content-Type", "application/json")
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "an-sdk-android/0.3.0 (Android)")
+        val conn: HttpURLConnection
+        val httpCode: Int
+        val raw: String
+        try {
+            conn = (URL(baseUrl + "/api/v1/scan").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                connectTimeout = 10_000
+                readTimeout = 15_000
+                setRequestProperty("Authorization", "Bearer $apiKey")
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("User-Agent", "an-sdk-android/0.3.0 (Android)")
+            }
+            conn.outputStream.use { it.write(payload) }
+            httpCode = conn.responseCode
+            val stream = if (httpCode in 200..299) conn.inputStream else conn.errorStream
+            raw = stream?.bufferedReader()?.use { it.readText() } ?: ""
+            conn.disconnect()
+        } catch (e: IOException) {
+            throw ANException(ANErrorCode.NETWORK, message = e.message ?: "network_error")
         }
-        conn.outputStream.use { it.write(payload) }
 
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val raw = stream?.bufferedReader()?.use { it.readText() } ?: ""
-        conn.disconnect()
-
-        if (code !in 200..299) throw ANException(code, raw.ifBlank { "HTTP $code" })
-        JSONObject(raw).optString("request_id").takeIf { it.isNotEmpty() }
+        if (httpCode !in 200..299) {
+            val json = runCatching { JSONObject(raw) }.getOrNull()
+            val code = ANErrorCode.fromRaw(json?.optString("error")?.takeIf { it.isNotEmpty() })
+            val msg = json?.optString("message")?.takeIf { it.isNotEmpty() }
+                ?: raw.ifBlank { "HTTP $httpCode" }
+            throw ANException(code, statusCode = httpCode, message = msg)
+        }
+        runCatching { JSONObject(raw).optString("request_id").takeIf { it.isNotEmpty() } }.getOrNull()
     }
 }
 
-class ANException(val statusCode: Int, message: String) :
-    IOException("AN SDK error $statusCode: $message")
+/**
+ * Stable error codes raised by the SDK.
+ *
+ * Server-side codes mirror the `error` field in `/api/v1/scan` responses.
+ * Local codes are raised before any network call — e.g. when the supplied
+ * image bytes are invalid.
+ *
+ * Adding a new case is non-breaking; renaming or removing one is breaking.
+ * [UNKNOWN] is the fallback for codes a newer server may introduce.
+ */
+enum class ANErrorCode(val raw: String) {
+    // --- Server-reported ---
+    UNAUTHORIZED("unauthorized"),
+    KEY_REVOKED("key_revoked"),
+    FEATURE_NOT_ALLOWED("feature_not_allowed"),
+    QUOTA_EXCEEDED("quota_exceeded"),
+    RATE_LIMITED("rate_limited"),
+    INVALID_BODY("invalid_body"),
+    EXPECTED_APPLICATION_JSON("expected_application_json"),
+    INVALID_VERDICT("invalid_verdict"),
+    INVALID_DETECTIONS("invalid_detections"),
+    SERVICE_UNAVAILABLE("service_unavailable"),
+    INTERNAL_ERROR("internal_error"),
+
+    // --- Local-only (no network involved) ---
+    EMPTY_IMAGE("empty_image"),
+    UNSUPPORTED_FORMAT("unsupported_format"),
+    IMAGE_TOO_LARGE("image_too_large"),
+    MODEL_LOAD_FAILED("model_load_failed"),
+    INFERENCE_FAILED("inference_failed"),
+    NETWORK("network"),
+
+    UNKNOWN("unknown");
+
+    companion object {
+        private val byRaw = values().associateBy { it.raw }
+        fun fromRaw(raw: String?): ANErrorCode = byRaw[raw] ?: UNKNOWN
+    }
+}
+
+class ANException(
+    val code: ANErrorCode,
+    /** HTTP status code if the error came from the server, `0` for local errors. */
+    val statusCode: Int = 0,
+    message: String,
+) : IOException(
+    if (statusCode == 0) "AN SDK error ${code.raw}: $message"
+    else "AN SDK error ${code.raw} (HTTP $statusCode): $message",
+) {
+    /** True if the caller can reasonably retry the same request later. */
+    val isRetryable: Boolean
+        get() = code == ANErrorCode.RATE_LIMITED ||
+                code == ANErrorCode.SERVICE_UNAVAILABLE ||
+                code == ANErrorCode.NETWORK
+}
