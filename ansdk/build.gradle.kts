@@ -28,6 +28,10 @@ android {
 
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // ONNX Runtime Android — same major as the iOS SDK uses (1.24.x), so
+    // model behavior stays comparable. `api` so consumers don't have to add
+    // the dep themselves to catch `OrtException`.
+    api("com.microsoft.onnxruntime:onnxruntime-android:1.24.2")
 }
 
 afterEvaluate {

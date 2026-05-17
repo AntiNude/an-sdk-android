@@ -1,5 +1,6 @@
 package com.an.sdk
 
+import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -7,7 +8,6 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import kotlin.random.Random
 import kotlin.system.measureTimeMillis
 
 /**
@@ -41,28 +41,45 @@ data class ScanResult(
 /**
  * AntiNude SDK client.
  *
- * Privacy model: the NSFW classifier runs **fully on-device**. No image bytes
+ * Privacy model: the NSFW detector runs **fully on-device**. No image bytes
  * ever leave the device. After local inference, the SDK reports only the
  * resulting verdict (and minimal metadata) to the AntiNude backend so the
  * developer can see usage in the dashboard.
  *
- * v0.3.0 ships a mock on-device model — verdicts and detections are
- * randomized. A real TFLite/ONNX model will replace [runLocalModel] in a
- * future version without changing the public API.
+ * v0.3 ships NudeNet 320n bundled as an asset inside the SDK. Construct
+ * with [Context] to load the bundled model; pass [modelBytes] to use a
+ * hot-updated or alternative model.
  */
-class ANClient(
+class ANClient private constructor(
     private val apiKey: String,
-    private val baseUrl: String = "https://antinude.site",
-    private val reportToServer: Boolean = true,
+    private val baseUrl: String,
+    private val reportToServer: Boolean,
+    private val detector: Detector,
 ) {
+
+    private val modelVersion: String = Detector.MODEL_VERSION
 
     /** Scan an image on device and (by default) report the verdict. */
     suspend fun scanImage(bytes: ByteArray): ScanResult {
-        val result: ScanResult
-        val ms = measureTimeMillis {
-            result = runLocalModel(bytes)
+        if (bytes.isEmpty()) {
+            throw ANException(ANErrorCode.EMPTY_IMAGE, message = "empty image")
         }
-        val full = result.copy(latencyMs = ms.toInt())
+
+        val detections: List<Detection>
+        val ms = measureTimeMillis {
+            detections = detector.detect(bytes)
+        }
+        val (verdict, top) = Detector.computeVerdict(detections)
+
+        val full = ScanResult(
+            verdict = verdict,
+            topCategory = top?.category,
+            topScore = top?.score,
+            latencyMs = ms.toInt(),
+            modelVersion = modelVersion,
+            requestId = null,
+            detections = detections,
+        )
         if (reportToServer) {
             val rid = runCatching { reportVerdict(full) }.getOrNull()
             return full.copy(requestId = rid)
@@ -70,59 +87,48 @@ class ANClient(
         return full
     }
 
-    // ---- on-device inference (mock) -------------------------------------------------
-
-    private val modelVersion = "mock-v0.3.0"
-
-    private val mockUnsafeClasses = arrayOf(
-        "FEMALE_BREAST_EXPOSED",
-        "FEMALE_GENITALIA_EXPOSED",
-        "MALE_GENITALIA_EXPOSED",
-        "BUTTOCKS_EXPOSED",
-    )
-    private val mockSafeClasses = arrayOf(
-        "FEMALE_BREAST_COVERED",
-        "FACE_FEMALE",
-        "FACE_MALE",
-        "FEET_EXPOSED",
-    )
-
-    private fun round4(v: Double): Double = (v * 10000).toInt() / 10000.0
-
-    private fun runLocalModel(bytes: ByteArray): ScanResult {
-        if (bytes.isEmpty()) throw ANException(ANErrorCode.EMPTY_IMAGE, message = "empty image")
-        // Pretend the model takes 30–80 ms to run.
-        Thread.sleep(30L + Random.nextLong(50))
-        val unsafe = Random.nextDouble() < 0.15
-        val pool = if (unsafe) mockUnsafeClasses else mockSafeClasses
-
-        val count = 1 + Random.nextInt(3)
-        val detections = ArrayList<Detection>(count)
-        repeat(count) {
-            val cat = pool.random()
-            val score = if (unsafe) 0.70 + Random.nextDouble() * 0.30 else Random.nextDouble() * 0.30
-            val x = Random.nextDouble() * 0.7
-            val y = Random.nextDouble() * 0.7
-            val w = 0.1 + Random.nextDouble() * (minOf(0.3, 1.0 - x) - 0.1).coerceAtLeast(0.0)
-            val h = 0.1 + Random.nextDouble() * (minOf(0.3, 1.0 - y) - 0.1).coerceAtLeast(0.0)
-            detections.add(
-                Detection(
-                    category = cat,
-                    score = round4(score),
-                    bbox = listOf(round4(x), round4(y), round4(w), round4(h)),
+    companion object {
+        /**
+         * Construct the client using the SDK's bundled NudeNet 320n model.
+         * Reads the model bytes from the SDK asset on first call (~12 MB).
+         *
+         * @throws ANException on [ANErrorCode.MODEL_LOAD_FAILED] if the
+         *   bundled asset is missing or ORT cannot load it.
+         */
+        @JvmStatic
+        @JvmOverloads
+        fun create(
+            context: Context,
+            apiKey: String,
+            baseUrl: String = "https://antinude.site",
+            reportToServer: Boolean = true,
+        ): ANClient {
+            val bytes = try {
+                context.assets.open("320n.onnx").use { it.readBytes() }
+            } catch (e: IOException) {
+                throw ANException(
+                    ANErrorCode.MODEL_LOAD_FAILED,
+                    message = "missing 320n.onnx asset: ${e.message}",
                 )
-            )
+            }
+            return create(apiKey, bytes, baseUrl, reportToServer)
         }
-        val top = detections.maxByOrNull { it.score }
-        return ScanResult(
-            verdict = if (unsafe) "unsafe" else "safe",
-            topCategory = top?.category,
-            topScore = top?.score,
-            latencyMs = 0,
-            modelVersion = modelVersion,
-            requestId = null,
-            detections = detections,
-        )
+
+        /**
+         * Construct the client using a caller-supplied model. Use this when
+         * integrating a hot-updated model downloaded from your own CDN.
+         */
+        @JvmStatic
+        @JvmOverloads
+        fun create(
+            apiKey: String,
+            modelBytes: ByteArray,
+            baseUrl: String = "https://antinude.site",
+            reportToServer: Boolean = true,
+        ): ANClient {
+            val detector = Detector(modelBytes)
+            return ANClient(apiKey, baseUrl, reportToServer, detector)
+        }
     }
 
     // ---- telemetry (verdict only, no bytes) ----------------------------------------
