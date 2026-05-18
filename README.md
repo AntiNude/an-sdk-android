@@ -1,10 +1,10 @@
 # AN SDK Android (v0.1, mock)
 
-Мок-SDK без реальной модели. Имитирует ответы и стриминг.
+Mock SDK without a real model. Simulates responses and streaming.
 
-## Подключение через JitPack
+## Install via JitPack
 
-В корневом `settings.gradle.kts` приложения:
+In your app's root `settings.gradle.kts`:
 
 ```kotlin
 dependencyResolutionManagement {
@@ -15,7 +15,7 @@ dependencyResolutionManagement {
 }
 ```
 
-В `build.gradle.kts` модуля:
+In the module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
@@ -23,9 +23,9 @@ dependencies {
 }
 ```
 
-> Замените `AntiNude` на ваш GitHub username/org. Версия = git-тег.
+> Replace `AntiNude` with your GitHub username/org. The version matches the git tag.
 
-## Использование
+## Usage
 
 ```kotlin
 import com.an.sdk.ANClient
@@ -34,15 +34,15 @@ import kotlinx.coroutines.flow.collect
 val client = ANClient(apiKey = "demo")
 
 // suspend
-val reply = client.send("Привет")
+val reply = client.send("Hello")
 
 // stream
-client.stream("Расскажи анекдот").collect { chunk ->
+client.stream("Tell me a joke").collect { chunk ->
     print(chunk)
 }
 ```
 
-## Релиз новой версии
+## Releasing a new version
 
 1. `git tag 0.1.0 && git push --tags`
-2. Открыть `https://jitpack.io/#AntiNude/an-sdk-android/0.1.0` — JitPack соберёт артефакт.
+2. Open `https://jitpack.io/#AntiNude/an-sdk-android/0.1.0` — JitPack will build the artifact.
