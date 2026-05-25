@@ -41,7 +41,7 @@ afterEvaluate {
                 from(components["release"])
                 groupId = "com.github.AntiNude"
                 artifactId = "an-sdk-android"
-                version = "0.3.0"
+                version = "0.9.0"
             }
         }
     }

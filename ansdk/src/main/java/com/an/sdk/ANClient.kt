@@ -46,18 +46,21 @@ data class ScanResult(
  * resulting verdict (and minimal metadata) to the AntiNude backend so the
  * developer can see usage in the dashboard.
  *
- * v0.3 ships NudeNet 320n bundled as an asset inside the SDK. Construct
- * with [Context] to load the bundled model; pass [modelBytes] to use a
- * hot-updated or alternative model.
+ * v0.9 ships NudeNet 320n bundled as an asset inside the SDK. Construct
+ * with [Context] to load the bundled model and pick up the host app's
+ * package id for bundle-binding; pass [modelBytes] to use a hot-updated or
+ * alternative model.
  */
 class ANClient private constructor(
     private val apiKey: String,
     private val baseUrl: String,
     private val reportToServer: Boolean,
     private val detector: Detector,
+    private val packageId: String?,
 ) {
 
     private val modelVersion: String = Detector.MODEL_VERSION
+    @Suppress("unused") val sdkVersion: String get() = SDK_VERSION
 
     /** Scan an image on device and (by default) report the verdict. */
     suspend fun scanImage(bytes: ByteArray): ScanResult {
@@ -88,9 +91,14 @@ class ANClient private constructor(
     }
 
     companion object {
+        /** Bundled SDK release. Sent in the `User-Agent` of every telemetry call. */
+        const val SDK_VERSION: String = "0.9.0"
+
         /**
          * Construct the client using the SDK's bundled NudeNet 320n model.
          * Reads the model bytes from the SDK asset on first call (~12 MB).
+         * The host app's [Context.getPackageName] is captured here so the
+         * backend can enforce bundle-bound API keys.
          *
          * @throws ANException on [ANErrorCode.MODEL_LOAD_FAILED] if the
          *   bundled asset is missing or ORT cannot load it.
@@ -111,12 +119,16 @@ class ANClient private constructor(
                     message = "missing 320n.onnx asset: ${e.message}",
                 )
             }
-            return create(apiKey, bytes, baseUrl, reportToServer)
+            return create(apiKey, bytes, baseUrl, reportToServer, context.packageName)
         }
 
         /**
          * Construct the client using a caller-supplied model. Use this when
          * integrating a hot-updated model downloaded from your own CDN.
+         *
+         * Pass [packageId] (typically `context.packageName`) if you want
+         * bundle-bound API keys to work; pass `null` to skip the
+         * `X-AntiNude-Bundle` header.
          */
         @JvmStatic
         @JvmOverloads
@@ -125,9 +137,10 @@ class ANClient private constructor(
             modelBytes: ByteArray,
             baseUrl: String = "https://antinude.site",
             reportToServer: Boolean = true,
+            packageId: String? = null,
         ): ANClient {
             val detector = Detector(modelBytes)
-            return ANClient(apiKey, baseUrl, reportToServer, detector)
+            return ANClient(apiKey, baseUrl, reportToServer, detector, packageId)
         }
     }
 
@@ -165,7 +178,12 @@ class ANClient private constructor(
                 setRequestProperty("Authorization", "Bearer $apiKey")
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
-                setRequestProperty("User-Agent", "an-sdk-android/0.3.0 (Android)")
+                setRequestProperty("User-Agent", "an-sdk-android/$SDK_VERSION (Android)")
+                if (!packageId.isNullOrEmpty()) {
+                    // Lets the backend enforce bundle-bound API keys.
+                    // Sandbox keys and unrestricted live keys ignore this header.
+                    setRequestProperty("X-AntiNude-Bundle", packageId)
+                }
             }
             conn.outputStream.use { it.write(payload) }
             httpCode = conn.responseCode
